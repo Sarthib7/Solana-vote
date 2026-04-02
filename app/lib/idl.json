@@ -1,0 +1,482 @@
+{
+  "address": "E9mdkmcBVoTRtJp6s2cuo9LJQqqJV314M7GptWkouc8r",
+  "metadata": {
+    "name": "solana_vote",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "On-chain voting and quiz platform for live workshops"
+  },
+  "instructions": [
+    {
+      "name": "cast_vote",
+      "discriminator": [
+        20,
+        212,
+        15,
+        189,
+        69,
+        180,
+        69,
+        151
+      ],
+      "accounts": [
+        {
+          "name": "voter",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "round",
+          "writable": true
+        },
+        {
+          "name": "vote_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  111,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "round"
+              },
+              {
+                "kind": "account",
+                "path": "voter"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "choice",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "close_session",
+      "discriminator": [
+        68,
+        114,
+        178,
+        140,
+        222,
+        38,
+        248,
+        211
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "session",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  101,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "session.join_code",
+                "account": "Session"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "create_round",
+      "discriminator": [
+        229,
+        218,
+        236,
+        169,
+        231,
+        80,
+        134,
+        112
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "session",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  101,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "session.join_code",
+                "account": "Session"
+              }
+            ]
+          }
+        },
+        {
+          "name": "round",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  111,
+                  117,
+                  110,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "session"
+              },
+              {
+                "kind": "account",
+                "path": "session.round_count",
+                "account": "Session"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "prompt",
+          "type": "string"
+        },
+        {
+          "name": "option_labels",
+          "type": {
+            "vec": "string"
+          }
+        },
+        {
+          "name": "duration_seconds",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "create_session",
+      "discriminator": [
+        242,
+        193,
+        143,
+        179,
+        150,
+        25,
+        122,
+        227
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "session",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  101,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "join_code"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "title",
+          "type": "string"
+        },
+        {
+          "name": "join_code",
+          "type": "string"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Session",
+      "discriminator": [
+        243,
+        81,
+        72,
+        115,
+        214,
+        188,
+        72,
+        144
+      ]
+    },
+    {
+      "name": "VoteRecord",
+      "discriminator": [
+        112,
+        9,
+        123,
+        165,
+        234,
+        9,
+        157,
+        167
+      ]
+    },
+    {
+      "name": "VotingRound",
+      "discriminator": [
+        150,
+        130,
+        184,
+        126,
+        107,
+        147,
+        21,
+        170
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "InvalidChoice",
+      "msg": "Invalid vote choice."
+    },
+    {
+      "code": 6001,
+      "name": "RoundExpired",
+      "msg": "Voting round has ended."
+    },
+    {
+      "code": 6002,
+      "name": "SessionNotActive",
+      "msg": "Session is not active."
+    },
+    {
+      "code": 6003,
+      "name": "Unauthorized",
+      "msg": "Unauthorized. Only the session authority can perform this action."
+    },
+    {
+      "code": 6004,
+      "name": "TitleTooLong",
+      "msg": "Title exceeds maximum length of 64 characters."
+    },
+    {
+      "code": 6005,
+      "name": "PromptTooLong",
+      "msg": "Prompt exceeds maximum length of 128 characters."
+    },
+    {
+      "code": 6006,
+      "name": "LabelTooLong",
+      "msg": "Label exceeds maximum length of 32 characters."
+    },
+    {
+      "code": 6007,
+      "name": "InvalidOptionCount",
+      "msg": "Voting rounds must have between 2 and 6 options."
+    },
+    {
+      "code": 6008,
+      "name": "LabelEmpty",
+      "msg": "Each voting option must include visible text."
+    },
+    {
+      "code": 6009,
+      "name": "InvalidJoinCode",
+      "msg": "Join code must be 4-10 uppercase letters or numbers."
+    }
+  ],
+  "types": [
+    {
+      "name": "Session",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "title",
+            "type": "string"
+          },
+          {
+            "name": "join_code",
+            "type": "string"
+          },
+          {
+            "name": "session_state",
+            "type": {
+              "defined": {
+                "name": "SessionState"
+              }
+            }
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "round_count",
+            "type": "u16"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SessionState",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Active"
+          },
+          {
+            "name": "Paused"
+          },
+          {
+            "name": "Ended"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VoteRecord",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "voter",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "pubkey"
+          },
+          {
+            "name": "choice",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VotingRound",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "session",
+            "type": "pubkey"
+          },
+          {
+            "name": "prompt",
+            "type": "string"
+          },
+          {
+            "name": "option_labels",
+            "type": {
+              "vec": "string"
+            }
+          },
+          {
+            "name": "option_counts",
+            "type": {
+              "vec": "u64"
+            }
+          },
+          {
+            "name": "start_time",
+            "type": "i64"
+          },
+          {
+            "name": "duration_seconds",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "round_index",
+            "type": "u16"
+          }
+        ]
+      }
+    }
+  ]
+}
