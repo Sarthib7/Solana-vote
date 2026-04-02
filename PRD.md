@@ -1,532 +1,387 @@
-# SolanaVote — On-Chain Interactive Voting & Quiz Platform
+# SolanaVote PRD
 
 ## Product Summary
 
-SolanaVote is a real-time, on-chain voting and quiz platform on Solana. An admin creates sessions containing multiple rounds (opinion polls or knowledge quizzes). Participants connect wallets and cast votes within optional time constraints. Results update in real-time via account subscriptions. One vote per wallet per round is enforced at the protocol level through PDA uniqueness.
+SolanaVote is a wallet-owned, live voting platform on Solana devnet.
 
-The system is split into two independently deployable units: an Anchor program (on-chain logic) and a Next.js frontend (client application). These share only a generated IDL as their interface contract.
+Any connected user can create a session, receive a short join code, and share a QR code or join link with participants. The creator can publish live prompts with 2 to 6 custom options. Participants join from their own wallets, vote once per round, and watch tallies update in real time across multiple clients.
 
----
-
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────┐
-│                   Frontend (Next.js)             │
-│  /admin — session + round management             │
-│  /       — participant voting + live results      │
-│  Wallet: @solana/wallet-adapter-react            │
-│  Client: Anchor TS (consumes IDL)                │
-│  Real-time: connection.onAccountChange()          │
-└────────────────────┬────────────────────────────┘
-                     │ RPC (devnet / localnet)
-┌────────────────────▼────────────────────────────┐
-│              Anchor Program (on-chain)           │
-│  Accounts: Session, VotingRound, VoteRecord      │
-│  Instructions: create_session, create_round,     │
-│                cast_vote, close_round,            │
-│                close_session                      │
-│  Duplicate prevention: PDA uniqueness constraint  │
-│  Timer enforcement: Clock sysvar comparison       │
-└─────────────────────────────────────────────────┘
-```
+The current product is a production-minded MVP with a strict devnet-only policy.
 
 ---
 
-## Tech Stack
+## Product Goals
 
-| Layer | Technology | Version | Notes |
-|-------|-----------|---------|-------|
-| On-chain program | Rust + Anchor | 0.32.x | Framework choice: Anchor. Native Rust path not required. |
-| Client SDK | @solana/web3.js v1 | 1.x | Used by Anchor TS client. Do not mix with @solana/kit in same codebase. |
-| Frontend | Next.js 14 | App Router | Scaffolded via `create-solana-dapp` |
-| Wallet connection | @solana/wallet-adapter-react | latest | Phantom as default adapter |
-| Styling | Tailwind CSS | 3.x | Included in scaffold template |
-| Package manager | pnpm or yarn | — | Whichever `create-solana-dapp` selects |
-| Cluster | Devnet | — | `solana config set --url devnet` |
-| Testing | Anchor test suite | — | Integration tests in TypeScript |
+1. Let any wallet holder create a live session without a hidden admin backend.
+2. Make joining simple through a short code or QR link instead of a raw PDA.
+3. Support multiple participant wallets while keeping Solana behavior explicit.
+4. Keep vote integrity on-chain with one vote per wallet per round.
+5. Keep the creator and participant experience fast enough for live demos and workshops.
 
 ---
 
-## Solana-Specific Constraints
+## Non-Goals
 
-> **These constraints are non-negotiable. Violating them produces code that compiles in Rust but fails at the Solana runtime. Every instruction, account struct, and client call must be checked against this list.**
+The current product does not include:
 
-| # | Constraint | Rationale |
-|---|-----------|-----------|
-| 1 | Programs are stateless. All state lives in accounts passed to instructions. | There is no contract storage. No `mapping`. No global variables persisted between calls. |
-| 2 | Use `u64` for all numeric values. Never `f64` or `f32`. | Floating point is non-deterministic on BPF. Transactions will fail. |
-| 3 | Use `Pubkey` for all addresses. | Not `address`, not `String`, not `bytes20`. |
-| 4 | PDAs are derived from `seeds` + `bump` in Anchor constraints. Always store the bump. | Recomputing bumps wastes compute units. Store in account struct, reference with `bump = account.bump`. |
-| 5 | Account size must be calculated at init. `space = 8 + field_sizes`. | 8 bytes = Anchor discriminator. String = `4 + max_byte_length`. Enum = 1 byte. |
-| 6 | Signer validation is mandatory on every state-mutating instruction. | Use `Signer<'info>` type + `has_one` or `constraint` checks. |
-| 7 | Time checks use `Clock::get()?.unix_timestamp` (i64). | Not `clock.slot`. Slots are not wall-clock time. |
-| 8 | Transaction size limit: 1,232 bytes. | Bounded String lengths are required. No unbounded Vec or String. |
-| 9 | `init` constraint handles rent exemption automatically. | Do not manually calculate lamports for rent. |
-| 10 | One vote per wallet per round is enforced by PDA seed uniqueness. | If the PDA already exists, the transaction fails. No explicit duplicate check needed in logic. |
-
-**Confidence level**: These constraints are verified against Anchor 0.32.x and Solana CLI 3.0.x as of March 2026. If using a newer Anchor version, verify constraint syntax has not changed.
+- Mainnet support
+- Creator payouts or protocol fees
+- Quiz scoring, correct answers, or answer reveal logic
+- Off-chain auth, usernames, or email accounts
+- Session analytics beyond current round history and live counts
+- Admin-controlled round shutdown after publish
 
 ---
 
-## On-Chain Program Specification
+## User Roles
 
-### Program ID
+### Creator
 
-Generated by `anchor keys list` after first `anchor build`. Stored in `Anchor.toml` and `declare_id!()` macro.
+- Connects a Solana wallet
+- Creates a session with a title and short join code
+- Shares a QR code or join link
+- Publishes live prompts with 2 to 6 options
+- Watches live results update in real time
 
-### Account Structures
+### Participant
 
-```
-Session
-├── authority: Pubkey              (32 bytes)
-├── title: String                  (4 + 64 bytes max)
-├── session_state: SessionState    (1 byte)
-├── bump: u8                       (1 byte)
-├── round_count: u16               (2 bytes)
-└── Total: 8 + 32 + 68 + 1 + 1 + 2 = 112 bytes
-
-PDA seeds: [b"session", authority.key().as_ref(), title.as_bytes()]
-```
-
-```
-VotingRound
-├── session: Pubkey                (32 bytes)
-├── prompt: String                 (4 + 128 bytes max)
-├── round_type: RoundType          (1 byte)
-├── option_a_label: String         (4 + 32 bytes max)
-├── option_b_label: String         (4 + 32 bytes max)
-├── option_a_count: u64            (8 bytes)
-├── option_b_count: u64            (8 bytes)
-├── start_time: i64                (8 bytes)
-├── duration_seconds: u64          (8 bytes)
-├── correct_answer: u8             (1 byte)
-├── is_active: bool                (1 byte)
-├── bump: u8                       (1 byte)
-├── round_index: u16               (2 bytes)
-└── Total: 8 + 32 + 132 + 1 + 36 + 36 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 2 = 282 bytes
-
-PDA seeds: [b"round", session.key().as_ref(), &session.round_count.to_le_bytes()]
-```
-
-```
-VoteRecord
-├── voter: Pubkey                  (32 bytes)
-├── round: Pubkey                  (32 bytes)
-├── choice: u8                     (1 byte)
-├── bump: u8                       (1 byte)
-└── Total: 8 + 32 + 32 + 1 + 1 = 74 bytes
-
-PDA seeds: [b"vote", round.key().as_ref(), voter.key().as_ref()]
-```
-
-### Enums
-
-```rust
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
-pub enum SessionState {
-    Active,   // 0
-    Paused,   // 1
-    Ended,    // 2
-}
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
-pub enum RoundType {
-    Vote,     // 0 — opinion poll, no correct answer
-    Quiz,     // 1 — knowledge check, has correct answer
-}
-```
-
-### Instructions
-
-#### `create_session`
-
-| Field | Detail |
-|-------|--------|
-| Signer | Admin wallet |
-| Creates | Session PDA |
-| Args | `title: String` |
-| Validation | `title.len() <= 64`, authority == signer |
-| Side effects | Sets `session_state = Active`, `round_count = 0` |
-
-#### `create_round`
-
-| Field | Detail |
-|-------|--------|
-| Signer | Admin wallet (must match `session.authority`) |
-| Creates | VotingRound PDA |
-| Args | `prompt: String`, `option_a_label: String`, `option_b_label: String`, `round_type: RoundType`, `duration_seconds: u64`, `correct_answer: u8` |
-| Validation | `prompt.len() <= 128`, labels `<= 32` each. If `round_type == Quiz`, `correct_answer` must be 1 or 2. If `round_type == Vote`, `correct_answer` must be 0. Session must be Active. |
-| Side effects | Increments `session.round_count`. Sets `start_time = Clock::get()?.unix_timestamp`. Sets `is_active = true`. |
-
-#### `cast_vote`
-
-| Field | Detail |
-|-------|--------|
-| Signer | Voter wallet |
-| Creates | VoteRecord PDA (enforces one vote per wallet per round) |
-| Mutates | VotingRound (increments `option_a_count` or `option_b_count`) |
-| Args | `choice: u8` (1 = Option A, 2 = Option B) |
-| Validation | `choice` must be 1 or 2. If `duration_seconds > 0`, verify `Clock::get()?.unix_timestamp <= start_time + duration_seconds as i64`. Round must have `is_active == true`. |
-
-#### `close_round`
-
-| Field | Detail |
-|-------|--------|
-| Signer | Admin wallet (must match `session.authority`) |
-| Mutates | VotingRound — sets `is_active = false` |
-| Args | None |
-
-#### `close_session`
-
-| Field | Detail |
-|-------|--------|
-| Signer | Admin wallet |
-| Mutates | Session — sets `session_state = Ended` |
-| Args | None |
-
-### Error Codes
-
-```rust
-#[error_code]
-pub enum VoteError {
-    #[msg("Invalid vote choice. Must be 1 (Option A) or 2 (Option B).")]
-    InvalidChoice,
-    #[msg("Voting round has expired.")]
-    RoundExpired,
-    #[msg("Voting round is not active.")]
-    RoundNotActive,
-    #[msg("Session is not active.")]
-    SessionNotActive,
-    #[msg("Unauthorized. Only the session authority can perform this action.")]
-    Unauthorized,
-    #[msg("Title exceeds maximum length of 64 bytes.")]
-    TitleTooLong,
-    #[msg("Prompt exceeds maximum length of 128 bytes.")]
-    PromptTooLong,
-    #[msg("Label exceeds maximum length of 32 bytes.")]
-    LabelTooLong,
-    #[msg("Quiz rounds must specify a correct answer (1 or 2).")]
-    QuizNeedsAnswer,
-    #[msg("Vote rounds must not specify a correct answer.")]
-    VoteHasNoAnswer,
-}
-```
+- Opens a shared join link or enters a join code
+- Connects a Solana wallet
+- Loads the latest active round for the session
+- Casts one vote for the current round
+- Sees live results and personal vote state
 
 ---
 
-## Frontend Specification
+## Core User Journeys
 
-### Scaffolding
+### Create Session
 
-```bash
-npx create-solana-dapp@latest
-# Name: solana-vote
-# Template: Next.js + Tailwind + Anchor
-```
+1. User opens `/creator`
+2. User connects a wallet
+3. User enters a session title and join code
+4. App validates wallet balance, join code format, and devnet cluster
+5. App creates the on-chain session PDA
+6. Creator receives a shareable join URL and QR code
+
+### Publish Round
+
+1. Creator opens an existing session
+2. Creator enters a prompt and 2 to 6 options
+3. Creator chooses an optional round duration
+4. App creates a `VotingRound` PDA on-chain
+5. Connected clients update from account subscriptions
+
+### Join and Vote
+
+1. Participant opens `/join?code=...` or pastes a join code
+2. App resolves the session PDA from the join code
+3. App loads the latest round for the session
+4. Participant connects a wallet
+5. App simulates the vote transaction before signature
+6. Participant signs once
+7. Vote record PDA is created and tallies update
+
+---
+
+## Product Surface
 
 ### Routes
 
-| Route | Purpose | Access Control |
-|-------|---------|---------------|
-| `/` | Connect wallet. View active round. Cast votes. See live results. | Wallet connected |
-| `/admin` | Create sessions. Create rounds (Vote/Quiz). Set timers. View results. Generate QR code. | Wallet connected + matches session authority |
+| Route | Purpose | Notes |
+|-------|---------|-------|
+| `/` | Landing page with create and join entry points | Includes devnet-only notice |
+| `/creator` | Creator dashboard | Create or reopen session, publish rounds, copy join code, show QR |
+| `/join` | Participant page | Join by code or link, load latest round, cast vote |
+| `/presenter` | Legacy redirect | Redirects to `/creator` |
+| `/availability` | No-content utility route | Returns `204` for probes and noisy external checks |
 
-### Components
+### Share Model
 
-| Component | Responsibility |
-|-----------|---------------|
-| `SessionManager` | Create session form. Session selector if multiple exist. Session status display. |
-| `RoundCreator` | Form: prompt, option labels, type toggle (Vote/Quiz), timer dropdown (None/15s/30s/60s), correct answer selector (Quiz only). |
-| `VotingCard` | Prompt display. Two large vote buttons. Disables after vote recorded. Displays confirmation with tx signature link to Explorer. |
-| `CountdownTimer` | Circular or bar countdown. Synced to `round.start_time + round.duration_seconds`. Disables voting at expiry. |
-| `ResultsBar` | Animated horizontal bars. Option A vs Option B with percentages and raw counts. For Quiz: correct answer highlight after timer ends. |
-| `LiveFeed` | Real-time updates via `connection.onAccountChange(roundPDA)`. Decodes VotingRound account on each callback. |
-| `QRCodeDisplay` | Generates QR code pointing to app URL with session PDA as query param. Uses `qrcode.react`. |
-| `ExplorerLink` | Formatted Solana Explorer URLs for each transaction. Devnet cluster param included. |
-
-### Real-Time Data Flow
-
-```typescript
-// Subscribe to round account changes
-const subscriptionId = connection.onAccountChange(
-  roundPDA,
-  (accountInfo) => {
-    const decoded = program.coder.accounts.decode('VotingRound', accountInfo.data);
-    setRound(decoded);
-  },
-  'confirmed'
-);
-
-// Cleanup on unmount
-return () => connection.removeAccountChangeListener(subscriptionId);
-```
-
-### UI Requirements
-
-| Requirement | Detail |
-|------------|--------|
-| Responsive | Mobile-first. Participants access via QR code on phones. |
-| Touch targets | Minimum 48px for vote buttons. |
-| Theme | Dark. High contrast between Option A and Option B colors. |
-| Feedback | Confirmation animation on vote submission. Tx signature + Explorer link shown. |
-| Error handling | Wallet not connected → prompt. Wrong network → banner. Duplicate vote → friendly message. Tx failed → retry option with error detail. |
-| Quiz reveal | After timer expires, highlight correct answer in green, incorrect in red. Show percentage of correct responses. |
+- Join URL format: `/join?code=ABCD12`
+- QR code points to the join URL
+- Legacy raw session address lookup is still accepted for backward compatibility
 
 ---
 
-## Project Structure
+## Wallet and Cluster Policy
 
-```
-solana-vote/
-├── programs/
-│   └── solana-vote/
-│       ├── src/
-│       │   └── lib.rs
-│       └── Cargo.toml
-├── app/
-│   ├── src/
-│   │   ├── app/
-│   │   │   ├── page.tsx
-│   │   │   ├── admin/
-│   │   │   │   └── page.tsx
-│   │   │   └── layout.tsx
-│   │   ├── components/
-│   │   │   ├── session-manager.tsx
-│   │   │   ├── round-creator.tsx
-│   │   │   ├── voting-card.tsx
-│   │   │   ├── countdown-timer.tsx
-│   │   │   ├── results-bar.tsx
-│   │   │   ├── live-feed.tsx
-│   │   │   ├── qr-code-display.tsx
-│   │   │   └── explorer-link.tsx
-│   │   ├── hooks/
-│   │   │   ├── use-solana-vote.ts
-│   │   │   └── use-round-subscription.ts
-│   │   └── lib/
-│   │       ├── constants.ts
-│   │       └── types.ts
-│   ├── public/
-│   └── package.json
-├── tests/
-│   └── solana-vote.ts
-├── target/
-│   └── idl/
-│       └── solana_vote.json
-├── migrations/
-│   └── deploy.ts
-├── Anchor.toml
-├── package.json
-├── STATUS.md
-└── README.md
-```
+### Cluster
 
-### Separation of Concerns
+- The app is hard-locked to `https://api.devnet.solana.com`
+- Transaction methods reject any non-devnet and non-localhost RPC endpoint
+- Local validator support is allowed for development and smoke testing
 
-The Anchor program and the frontend are logically independent. The **only shared artifact** is `target/idl/solana_vote.json`. The frontend imports this IDL to construct typed Anchor client calls. No frontend code references program internals directly. No program code assumes any frontend structure.
+### Wallet Support
 
-This means:
-- The program can be developed, tested, and deployed independently.
-- The frontend can be developed against a deployed program or a mocked IDL.
-- Multiple agents can work on program vs. frontend in parallel without file conflicts.
+- Phantom is explicitly supported
+- Solflare is explicitly supported
+- Wallet Standard discovery is enabled through `@solana/wallet-adapter-react`
+- Compatible wallets such as Backpack should appear through Wallet Standard when installed
+
+### Phantom-Specific Behavior
+
+- After Phantom connects, the app requests a switch to devnet using Phantom Browser SDK
+- The switch requires user approval
+- Non-Phantom wallets must be placed on devnet manually by the user
 
 ---
 
-## Testing Strategy
+## Technical Architecture
 
-### Anchor Integration Tests (`tests/solana-vote.ts`)
+### Frontend
 
-| # | Test Case | Expected Result | Priority |
-|---|-----------|----------------|----------|
-| 1 | Create session with valid title | Session PDA created. Authority matches signer. State = Active. round_count = 0. | P0 |
-| 2 | Create voting round | Round PDA created. Counts = 0. round_type = Vote. correct_answer = 0. start_time set. | P0 |
-| 3 | Create quiz round with correct_answer = 1 | Round PDA created. round_type = Quiz. correct_answer = 1. | P0 |
-| 4 | Cast vote for Option A | option_a_count increments to 1. VoteRecord PDA created. | P0 |
-| 5 | Cast vote for Option B | option_b_count increments to 1. VoteRecord PDA created. | P0 |
-| 6 | Duplicate vote from same wallet | Transaction fails. Account already in use error. | P0 |
-| 7 | Vote with invalid choice (choice = 3) | Fails with InvalidChoice error. | P1 |
-| 8 | Vote after timer expired | Fails with RoundExpired error. | P1 |
-| 9 | Create round from non-authority wallet | Fails with Unauthorized error. | P1 |
-| 10 | Create round with prompt > 128 bytes | Fails with PromptTooLong error. | P1 |
-| 11 | Create quiz round with correct_answer = 0 | Fails with QuizNeedsAnswer error. | P1 |
-| 12 | Create vote round with correct_answer = 2 | Fails with VoteHasNoAnswer error. | P1 |
-| 13 | Close round then attempt to vote | Fails with RoundNotActive error. | P1 |
-| 14 | Close session then attempt to create round | Fails with SessionNotActive error. | P2 |
-| 15 | Multiple voters on same round | All VoteRecords created. Counts match total votes cast. | P0 |
+- Framework: Next.js 14 App Router
+- Wallet stack: `@solana/wallet-adapter-react`, `@solana/wallet-adapter-react-ui`
+- Phantom enhancement: `@phantom/browser-sdk`
+- State model: client-side fetch plus `connection.onAccountChange()`
+- Share UX: QR code via `qrcode.react`
 
-### Test Execution
+### On-Chain
 
-```bash
-# Full test suite (builds, deploys to localnet, runs tests)
-anchor test
+- Framework: Anchor
+- Program ID: `E9mdkmcBVoTRtJp6s2cuo9LJQqqJV314M7GptWkouc8r`
+- Cluster: devnet
+- Local development: `solana-test-validator`
 
-# Against devnet (after manual deploy)
-anchor test --provider.cluster devnet --skip-deploy
-```
+### Client / Program Contract
 
-### Frontend Smoke Tests (Manual Checklist)
-
-- [ ] Wallet connects via Phantom on devnet
-- [ ] Network mismatch banner shows if not on devnet
-- [ ] Session creation tx succeeds and session appears
-- [ ] Round creation tx succeeds and round appears with correct type
-- [ ] Vote buttons respond, tx confirms, buttons disable after vote
-- [ ] Results bars update within 2 seconds of vote
-- [ ] Timer counts down and disables voting at 0
-- [ ] Quiz round reveals correct answer after timer
-- [ ] QR code resolves to correct URL with session param
-- [ ] Explorer links open correct tx on devnet explorer
-- [ ] Mobile viewport renders voting card correctly (test 375px width)
+- The app consumes the generated IDL in `app/lib/idl.json`
+- PDA derivation is duplicated in the client for lookup and optimistic resolution
 
 ---
 
-## Development Phases
+## On-Chain Account Model
 
-### Phase 1: Program Core
-> **Files touched**: `programs/solana-vote/src/lib.rs`, `Anchor.toml`
-> **No frontend files touched. No test files touched yet.**
+### Session
 
-**Scope**: Account structs (`Session`, `VotingRound`, `VoteRecord`), enums (`SessionState`, `RoundType`), instructions (`create_session`, `create_round`, `cast_vote`), error codes.
+Fields:
 
-**Completion criteria**:
-- `anchor build` succeeds with zero warnings
-- `anchor deploy` to devnet succeeds
-- Program ID recorded in Anchor.toml and lib.rs
+- `authority: Pubkey`
+- `title: String`
+- `join_code: String`
+- `session_state: SessionState`
+- `bump: u8`
+- `round_count: u16`
 
-**Confidence**: High. Standard Anchor PDA patterns with well-defined account structures.
+PDA seeds:
 
-**Risk**: Account space miscalculation → program init fails at runtime. **Mitigation**: Byte sizes are pre-calculated in this PRD. Verify arithmetic before deploying.
+- `[b"session", join_code.as_bytes()]`
 
----
+### VotingRound
 
-### Phase 2: Program Hardening
-> **Files touched**: `programs/solana-vote/src/lib.rs` (additive only), `tests/solana-vote.ts`
-> **No frontend files touched.**
+Fields:
 
-**Scope**: `close_round` and `close_session` instructions. All validation error paths. Timer enforcement logic. Full test suite (tests 1–15).
+- `session: Pubkey`
+- `prompt: String`
+- `option_labels: Vec<String>`
+- `option_counts: Vec<u64>`
+- `start_time: i64`
+- `duration_seconds: u64`
+- `bump: u8`
+- `round_index: u16`
 
-**Completion criteria**:
-- Tests 1–15 all pass via `anchor test`
-- Every error code is exercised by at least one test
-- No test uses `.skip()` or is commented out
+PDA seeds:
 
-**Confidence**: High. Guard clauses on existing instruction patterns. Timer logic is a single comparison.
+- `[b"round", session.key().as_ref(), &session.round_count.to_le_bytes()]`
 
-**Risk**: Clock sysvar may behave differently in local test validator vs devnet. **Mitigation**: Use `sleep()` in timer expiry test. If flaky, add 2-second buffer.
+### VoteRecord
 
----
+Fields:
 
-### Phase 3: Frontend — Wallet + Admin Dashboard
-> **Files touched**: Everything under `app/src/`. No program files touched.
-> **Depends on**: IDL from Phase 1 (`target/idl/solana_vote.json`)
+- `voter: Pubkey`
+- `round: Pubkey`
+- `choice: u8`
+- `bump: u8`
 
-**Scope**: Wallet connection (Phantom, devnet), `SessionManager` component, `RoundCreator` component, admin page (`/admin`), Anchor client hook (`use-solana-vote.ts`), constants and types.
+PDA seeds:
 
-**Completion criteria**:
-- Wallet connects to devnet via Phantom
-- Admin can create session → tx confirms → session account readable
-- Admin can create Vote and Quiz rounds → tx confirms → round account readable
-- Explorer links work for all transactions
-
-**Confidence**: High. `create-solana-dapp` template provides wallet adapter wiring. Anchor TS client generation is mature.
-
-**Risk**: IDL import path breaks across monorepo boundaries. **Mitigation**: Copy IDL to `app/src/lib/solana_vote.json` and import directly.
+- `[b"vote", round.key().as_ref(), voter.key().as_ref()]`
 
 ---
 
-### Phase 4: Frontend — Voting + Real-Time Results
-> **Files touched**: `app/src/components/`, `app/src/hooks/`. No program files touched.
-> **Depends on**: Phase 3 wallet wiring and Anchor client.
+## On-Chain Instructions
 
-**Scope**: `VotingCard`, `CountdownTimer`, `ResultsBar`, `LiveFeed` (account subscription), `QRCodeDisplay`, `ExplorerLink`. Participant page (`/`).
+### `create_session(title, join_code)`
 
-**Completion criteria**:
-- Participant can cast vote → tx confirms → buttons disable → confirmation shown
-- Results update in real-time via WebSocket (< 2 second latency)
-- Timer counts down and disables voting at expiry
-- QR code generates correct URL with session PDA
-- Mobile-responsive at 375px viewport
+Behavior:
 
-**Confidence**: Medium-High. `onAccountChange` is reliable but requires cleanup on unmount. Timer sync between client clock and on-chain clock can drift ±2 seconds.
+- Creates a session account
+- Stores creator wallet as authority
+- Initializes `session_state = Active`
+- Initializes `round_count = 0`
 
-**Risk**: Public devnet RPC has WebSocket connection limits. **Mitigation**: Use Helius or QuickNode free-tier RPC with WebSocket support. Fallback: 3-second polling interval.
+Validation:
 
----
+- `title.len() <= 64`
+- join code must be 4 to 10 uppercase alphanumeric characters
 
-### Phase 5: Polish + Quiz Logic
-> **Files touched**: Modifications across Phase 4 components. No new files expected.
-> **Depends on**: Phase 4 complete.
+Payer:
 
-**Scope**: Quiz-specific UI (correct answer reveal with green/red highlights, percentage correct display). Error state handling across all components. Loading states and skeleton screens. Final dark theme polish. Mobile optimization pass.
+- Creator wallet
 
-**Completion criteria**:
-- Full manual smoke test checklist passes (all items checked)
-- Quiz rounds show correct/incorrect feedback after timer
-- All error states display user-friendly messages (not raw error codes)
-- Mobile viewport tested at 375px, 390px, 414px widths
-- No console errors in browser dev tools
+### `create_round(prompt, option_labels, duration_seconds)`
 
-**Confidence**: Medium. Quiz reveal timing depends on accurate timer sync. Visual polish is subjective but bounded by component scope.
+Behavior:
 
----
+- Creates a round account for the next round index
+- Stores prompt and variable-length options
+- Initializes counts to zero
+- Sets `start_time = Clock::get()?.unix_timestamp`
+- Increments `session.round_count`
 
-## Pre-Flight Checklist
+Validation:
 
-> **Run through this checklist before marking any phase complete. These are patterns AI coding agents frequently get wrong for Solana.**
+- `prompt.len() <= 128`
+- option count between 2 and 6
+- each option must be non-empty after trim
+- each option must be `<= 32` characters
+- session authority must match signer
+- session must be active
 
-| # | Check | What to look for | Severity |
-|---|-------|------------------|----------|
-| 1 | No floating point in program | Search for `f64`, `f32`, `as f64`, `as f32` in all `.rs` files | Critical |
-| 2 | All accounts have exact space calculation | Every `init` constraint has `space = 8 + ...` matching this PRD | Critical |
-| 3 | PDA bumps are stored and reused | Account structs contain `bump: u8`. Constraints use `bump = account.bump` | High |
-| 4 | Signer validation on all admin instructions | `create_session`, `create_round`, `close_round`, `close_session` all check signer | Critical |
-| 5 | No Ethereum patterns | No `msg.sender`, no contract-owned storage, no `mapping`, no `address` type | Critical |
-| 6 | Strings have bounded max length | `String` fields use `4 + max_bytes` in space. No unbounded String or Vec. | Critical |
-| 7 | Time uses `Clock::get()?.unix_timestamp` | Not `clock.slot`, not `SystemTime::now()`, not `Instant` | High |
-| 8 | `u64` for all counts and amounts | Vote counts, durations are integer types only | Critical |
-| 9 | No excessive `msg!()` calls | Only for debugging. Each call costs compute units. | Medium |
-| 10 | Frontend cleans up account subscriptions | `removeAccountChangeListener` called in useEffect cleanup | Medium |
-| 11 | IDL is regenerated after program changes | `anchor build` regenerates `target/idl/`. Frontend must use latest copy. | High |
-| 12 | Program ID consistent everywhere | `anchor keys list` value matches Anchor.toml, `declare_id!()`, and frontend `constants.ts` | Critical |
+Payer:
 
----
+- Creator wallet
 
-## Execution Requirements
+### `cast_vote(choice)`
 
-- Scaffold using `npx create-solana-dapp@latest`. Do not manually assemble the frontend.
-- Install the official Solana Developer MCP: `https://mcp.solana.com/mcp`
-- Use `anchor build && anchor deploy` for program deployment.
-- Run `anchor test` for the full test suite. Do not skip or comment out tests.
-- Use `solana-test-validator` for local development. Switch to devnet for deployed testing.
-- If devnet airdrop fails (rate limit), use `faucet.solana.com` or pre-funded wallets.
-- Keep all Solana logic (RPC calls, transaction construction, account deserialization) in `hooks/` and `lib/`. Not in UI components.
-- Do not install packages outside the tech stack without explicit justification.
-- After every phase, run the pre-flight checklist. Fix any violations before proceeding.
+Behavior:
 
----
+- Creates a vote-record PDA unique to `(round, voter)`
+- Increments the chosen option counter
 
-## Final Output Requirements
+Validation:
 
-After all phases complete, produce:
+- choice index must be within `option_counts`
+- if duration is non-zero, current time must be before or at deadline
+- duplicate votes fail because the vote-record PDA already exists
 
-1. **Commands summary**:
-   - Build program: `anchor build`
-   - Run tests: `anchor test`
-   - Deploy to devnet: `anchor deploy`
-   - Start frontend: `cd app && pnpm dev`
-   - Start local validator: `solana-test-validator`
+Payer:
 
-2. **Verification summary**:
-   - Program ID (from `anchor keys list`)
-   - Devnet deployment status (deployed / not deployed)
-   - Test results (X/15 passing)
-   - Frontend accessible at `http://localhost:3000`
-   - Mobile responsiveness confirmed
+- Participant wallet
 
-3. **Stack attribution**:
-   - Official Solana: Solana CLI, Anchor, @solana/web3.js, wallet-adapter, create-solana-dapp
-   - Ecosystem: QR code library (`qrcode.react`), Tailwind CSS
+### `close_session()`
+
+Behavior:
+
+- Sets `session_state = Ended`
+
+Validation:
+
+- signer must match `session.authority`
+
+Payer:
+
+- No new account is created
 
 ---
 
-*PRD v2.0 — April 2026*
+## Solana Constraints and Economics
+
+### Deterministic Rules
+
+- No floats in program state or logic
+- All vote counts are `u64`
+- PDA bumps are stored in account data
+- Time logic uses `Clock::get()?.unix_timestamp`
+
+### Who Pays What
+
+- Session creation: creator pays account rent plus transaction fee
+- Round creation: creator pays account rent plus transaction fee
+- Vote casting: participant pays transaction fee plus rent for their `VoteRecord`
+
+### Payment Policy
+
+- No lamports are transferred to the creator during voting
+- The product currently charges no protocol fee
+- Voting is not a creator-monetization flow in the current release
+
+---
+
+## Frontend Behavior
+
+### Creator Dashboard
+
+Current capabilities:
+
+- Create a new session with title and join code
+- Reopen an existing session by join link, join code, or legacy PDA
+- Display creator wallet, session address, join code, and QR
+- Publish prompts with 2 to 6 options
+- View current and previous rounds
+- Copy join code and join URL
+
+### Join Page
+
+Current capabilities:
+
+- Load session from join link or join code
+- Resolve latest round automatically
+- Subscribe to session and round updates
+- Display current tallies and participant vote state
+- Prevent repeat voting in the UI after vote-record detection
+
+### Transaction Safety
+
+- Create, publish, vote, and close-session calls simulate before requesting wallet signature
+- Known Solana and Anchor errors are normalized into readable client errors
+- Non-devnet endpoints are rejected before signing
+
+---
+
+## Verification Requirements
+
+The current product is considered working when all of the following are true:
+
+### Repo Verification
+
+- `npm run build` passes
+- `npm run lint` passes
+- `NO_DNA=1 anchor test --skip-deploy` passes
+
+### Backend Smoke
+
+- Local smoke succeeds against `solana-test-validator`
+- Devnet smoke succeeds against the deployed program
+
+### Product Smoke
+
+- Creator can create a session from the browser
+- Creator can publish a round
+- Participant can join with a join link or code
+- Participant can vote successfully
+- Live tallies update across clients
+
+---
+
+## Known Gaps
+
+1. There is no `close_round` instruction yet.
+2. There is no formal TypeScript Anchor integration suite in `tests/`.
+3. `PRD.md`, `AGENTS.md`, and `STATUS.md` must stay aligned with the current join-code and dynamic-option model.
+4. Phantom can be prompted to switch to devnet, but other wallets must be set to devnet manually.
+5. The product is voting-only today. Quiz-specific scoring and answer reveal are future work.
+
+---
+
+## Next Priorities
+
+1. Add a formal integration test suite for create session, create round, cast vote, duplicate vote, and expiry cases.
+2. Add `close_round` if creator-controlled shutdown is required.
+3. Deploy the frontend on Vercel for stable QR-based demos.
+4. Expand wallet messaging so Backpack and other wallets show explicit devnet setup help.
+
+---
+
+## Source of Truth
+
+If this document conflicts with the implementation, the current source of truth is:
+
+1. `anchor/programs/solana-vote/src/lib.rs`
+2. `app/lib/hooks/useSolanaVote.ts`
+3. `app/creator/page.tsx`
+4. `app/join/page.tsx`
+5. `scripts/backend-smoke.cjs`
+
+This PRD is intended to match that implementation as of `2026-04-02`.
