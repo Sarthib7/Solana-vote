@@ -58,6 +58,18 @@ function getProgram(provider: AnchorProvider | ReadonlyProvider): any {
   return new Program(IDL, provider);
 }
 
+function isSupportedEndpoint(rpcEndpoint: string): boolean {
+  return rpcEndpoint.includes("devnet") || rpcEndpoint.includes("127.0.0.1") || rpcEndpoint.includes("localhost");
+}
+
+function assertSupportedCluster(connection: Connection) {
+  if (!isSupportedEndpoint(connection.rpcEndpoint)) {
+    throw new Error(
+      `Unsupported Solana cluster: ${connection.rpcEndpoint}. This app only signs devnet transactions.`
+    );
+  }
+}
+
 function getSessionPDA(joinCode: string): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [Buffer.from("session"), Buffer.from(joinCode)],
@@ -168,6 +180,8 @@ async function simulateWalletInstruction(
   payerKey: PublicKey,
   instruction: TransactionInstruction
 ) {
+  assertSupportedCluster(connection);
+
   const { blockhash } = await connection.getLatestBlockhash("confirmed");
   const message = new TransactionMessage({
     payerKey,
@@ -210,6 +224,7 @@ export function useSolanaVote() {
   const createSession = useCallback(
     async (title: string, joinCode: string) => {
       if (!program || !wallet) throw new Error("Wallet not connected");
+      assertSupportedCluster(connection);
       const [sessionPDA] = getSessionPDA(joinCode);
       const method = program.methods
         .createSession(title, joinCode)
@@ -240,6 +255,7 @@ export function useSolanaVote() {
       durationSeconds: number
     ) => {
       if (!wallet) throw new Error("Wallet not connected");
+      assertSupportedCluster(connection);
       const [roundPDA] = getRoundPDA(sessionPDA, roundCount);
       const method = program.methods
         .createRound(prompt, optionLabels, new BN(durationSeconds))
@@ -265,6 +281,7 @@ export function useSolanaVote() {
   const castVote = useCallback(
     async (roundPDA: PublicKey, choice: number) => {
       if (!program || !wallet) throw new Error("Wallet not connected");
+      assertSupportedCluster(connection);
       const [voteRecordPDA] = getVoteRecordPDA(roundPDA, wallet.publicKey);
       const method = program.methods
         .castVote(choice)
@@ -290,6 +307,7 @@ export function useSolanaVote() {
   const closeSession = useCallback(
     async (sessionPDA: PublicKey) => {
       if (!program || !wallet) throw new Error("Wallet not connected");
+      assertSupportedCluster(connection);
       const method = program.methods
         .closeSession()
         .accounts({
